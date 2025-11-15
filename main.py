@@ -10,6 +10,7 @@ import os
 import json
 from vision import StrandsOCRv2, quick_extract
 from solver import solve_from_json, list_available_grids
+from spangram_finder import SpangramFinder
 
 # ============================================================================
 # CONFIGURATION - EDIT THESE TO CHANGE BEHAVIOR
@@ -117,17 +118,6 @@ def update_json_theme_and_count(json_path, theme, word_count):
         json.dump(data, f, indent=2)
 
 
-def update_json_theme(json_path, theme):
-    """
-    Update the theme in an existing JSON file (backwards compatibility)
-    
-    Args:
-        json_path: Path to the JSON file
-        theme: New theme to set
-    """
-    update_json_theme_and_count(json_path, theme, 8)  # Default to 8 words
-
-
 def manual_grid_entry_inline(image_name, rows=8, cols=6):
     """Quick manual entry integrated into main.py"""
     
@@ -194,7 +184,7 @@ def main():
     """Main function - runs when you press Play in VSCode"""
     
     print("="*70)
-    print("🎮 STRANDS SOLVER")
+    print("🎮 STRANDS SOLVER (TWO-PHASE)")
     print("="*70)
     
     # Check if theme matching is enabled
@@ -202,7 +192,6 @@ def main():
         print("\n💡 Theme matching is ENABLED (uses Claude API)")
         
         # Check if API key is set
-        import os
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if api_key:
             print(f"   ✓ API key is set ({api_key[:15]}...)")
@@ -306,11 +295,11 @@ def main():
                 return
     
     # ========================================================================
-    # SOLVE PUZZLE
+    # SOLVE PUZZLE (TWO-PHASE APPROACH)
     # ========================================================================
     if MODE in ["solve", "both"]:
         print("\n" + "="*70)
-        print("STEP 2: SOLVING PUZZLE")
+        print("STEP 2: SOLVING PUZZLE (TWO-PHASE)")
         print("="*70)
         
         # Find the JSON file to solve
@@ -328,49 +317,121 @@ def main():
             print(f"\nUsing most recent grid: {os.path.basename(json_file)}")
         
         try:
+            # ================================================================
+            # PHASE 1: Find theme words
+            # ================================================================
+            print("\n" + "-"*70)
+            print("PHASE 1: IDENTIFYING THEME WORDS")
+            print("-"*70)
+            
             solver = solve_from_json(
                 json_file, 
                 dictionary_path="wordlist.txt",
                 use_theme_matching=USE_THEME_MATCHING
             )
             
-            if solver and solver.found_words:
+            if not solver or not solver.found_words:
+                print("\n❌ Phase 1 failed: Could not find words in grid")
+                return
+            
+            # Get puzzle info
+            theme = solver.puzzle_info.get('theme', 'Unknown')
+            word_count = solver.puzzle_info.get('word_count', 8)
+
+            
+            # Extract theme words from Phase 1
+            if USE_THEME_MATCHING and solver.theme_matched_words:
+                phase1_words = list(solver.theme_matched_words.keys())
+                
+                print(f"Theme-relevant words identified by API: {len(phase1_words)}")
+                print("\nTop theme matches:")
+                sorted_matches = sorted(
+                    solver.theme_matched_words.items(),
+                    key=lambda x: x[1].get('relevance', 0),
+                    reverse=True
+                )
+                for i, (word, info) in enumerate(sorted_matches[:15], 1):
+                    score = info.get('relevance', 0)
+                    print(f"  {i:2}. {word.upper():<15} ({score:.0%})")
+                
+                # ============================================================
+                # PHASE 2: Identify spangram
+                # ============================================================
+                print("\n" + "-"*70)
+                print("PHASE 2: IDENTIFYING SPANGRAM")
+                print("-"*70)
+                
+                finder = SpangramFinder(solver)
+                spangram = finder.identify_spangram_from_phase1(
+                    phase1_words, 
+                    expected_theme_count=word_count
+                )
+                
+                # ============================================================
+                # FINAL RESULTS
+                # ============================================================
                 print("\n" + "="*70)
-                print("✅ COMPLETE!")
+                print("✅ FINAL SOLUTION")
                 print("="*70)
                 
-                theme = solver.puzzle_info.get('theme', 'Unknown')
-                
-                print(f"\n📊 Summary:")
-                print(f"   • Theme: {theme}")
-                print(f"   • Total words found: {len(solver.found_words)}")
-                
-                # Show spangrams
-                spangrams = solver.find_spangrams()
-                if spangrams:
-                    print(f"   • Total spangrams: {len(spangrams)}")
-                    print(f"     {', '.join(spangrams.keys())}")
-                
-                # Show theme-matched results
-                if USE_THEME_MATCHING and solver.theme_matched_words:
-                    print(f"   • Theme-relevant words: {len(solver.theme_matched_words)}")
+                if spangram:
+                    # Separate spangram words from regular theme words
+                    spangram_words_set = set(spangram['words'])
+                    regular_theme_words = [w for w in phase1_words if w not in spangram_words_set]
                     
-                    # Show theme spangrams
-                    theme_spangrams = solver.find_theme_spangrams()
-                    if theme_spangrams:
-                        print(f"   • Theme spangrams: {', '.join(theme_spangrams.keys())}")
+                    print(f"\n🎯 Theme: {theme}")
+                    print(f"\n✅ Regular theme words ({len(regular_theme_words)}):")
+                    for word in sorted(regular_theme_words):
+                        print(f"  • {word.upper()}")
                     
-                    print(f"\n💡 Top theme matches:")
-                    sorted_matches = sorted(
-                        solver.theme_matched_words.items(),
-                        key=lambda x: x[1].get('relevance', 0),
-                        reverse=True
-                    )
-                    for word, info in sorted_matches[:10]:
-                        score = info.get('relevance', 0)
-                        is_spangram = word in spangrams
-                        marker = " 🎯 SPANGRAM" if is_spangram else ""
-                        print(f"     • {word.upper():<15} ({score:.0%}){marker}")
+                    print(f"\n✅ Spangram (1 solution, {len(spangram['words'])} words combined):")
+                    print(f"  • {spangram['combined_name']}")
+                    print(f"    Composed of: {', '.join([w.upper() for w in spangram['words']])}")
+                    print(f"    Total cells: {spangram['total_cells']}")
+                    print(f"    Touches: {spangram['touches']}")
+                    
+                    # Show adjacency
+                    if len(spangram['words']) > 1:
+                        print(f"\n    Adjacency connections:")
+                        for i in range(len(spangram['paths']) - 1):
+                            word1 = spangram['words'][i]
+                            word2 = spangram['words'][i + 1]
+                            path1 = spangram['paths'][i]
+                            path2 = spangram['paths'][i + 1]
+                            
+                            end_cell = path1[-1]
+                            start_cell = path2[0]
+                            
+                            end_letter = solver.grid[end_cell[0]][end_cell[1]]
+                            start_letter = solver.grid[start_cell[0]][start_cell[1]]
+                            
+                            print(f"      {word1.upper()}[{end_letter}] → {word2.upper()}[{start_letter}]")
+                    
+                    total_solutions = len(regular_theme_words) + 1
+                    print(f"\n📊 Summary:")
+                    print(f"   Total solutions: {total_solutions}")
+                    print(f"   Expected: {word_count}")
+                    
+                    if total_solutions == word_count:
+                        print("\n🎉 SUCCESS! Found correct number of solutions!")
+                    else:
+                        print(f"\n⚠️  Warning: Solution count ({total_solutions}) doesn't match expected ({word_count})")
+                    
+                    # Visualize the spangram
+                    print("\n" + "-"*70)
+                    print("SPANGRAM VISUALIZATION")
+                    print("-"*70)
+                    finder.visualize_spangram(spangram)
+                    
+                else:
+                    print("\n⚠️  No valid spangram found")
+                    print("   Showing all theme words identified:")
+                    for word in sorted(phase1_words):
+                        print(f"  • {word.upper()}")
+                
+            else:
+                print("\n⚠️  Theme matching disabled or no theme words found")
+                print(f"   Found {len(solver.found_words)} total words in grid")
                 
         except Exception as e:
             print(f"\n❌ Error during solving: {e}")
@@ -381,7 +442,6 @@ def main():
     print("\n" + "="*70)
     print("🎉 ALL DONE!")
     print("="*70)
-    print("\n💡 To change settings, edit the configuration at the top of main.py")
 
 
 if __name__ == "__main__":

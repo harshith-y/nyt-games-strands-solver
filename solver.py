@@ -1,16 +1,15 @@
 """
-NYT Strands Solver - Cleaned and Organized Version
+NYT Strands Solver - No Spangram Version
 Solves Strands puzzles using DFS + Trie + LLM theme matching
 
 ARCHITECTURE:
 1. Core Classes (Trie, TrieNode, StrandsSolver)
 2. Word Finding (DFS to find all valid words)
-3. Spangram Detection (single & multi-word)
-4. Theme Matching (Claude API)
-5. Solving Strategies (4 methods)
-6. Utility Functions
+3. Theme Matching (Claude API)
+4. Solving Strategy (adaptive clustering with multiple interpretations)
+5. Utility Functions
 
-Author: Cleaned version
+Author: Cleaned version (spangram code removed)
 """
 
 import json
@@ -34,22 +33,17 @@ MAX_WORDS = 15       # Try up to 15 words in combinations
 
 # Confidence thresholds for exhaustive search
 HIGH_CONFIDENCE_THRESHOLD = 7.0      # Score threshold (0-10)
-HIGH_CONFIDENCE_ATTEMPTS = 50000     # Max attempts when confidence >= 7.0 (IMPROVED: 2x)
-NORMAL_ATTEMPTS = 10000              # Max attempts for normal confidence (IMPROVED: 2x)
+HIGH_CONFIDENCE_ATTEMPTS = 50000     # Max attempts when confidence >= 7.0
+NORMAL_ATTEMPTS = 10000              # Max attempts for normal confidence
 
 # Visualization settings
-SHOW_PROGRESS_EVERY = 500            # Show progress every N attempts (IMPROVED: less spam)
+SHOW_PROGRESS_EVERY = 500            # Show progress every N attempts
 SHOW_CLOSE_ATTEMPTS = True           # Show grids for close attempts
 CLOSE_ATTEMPT_THRESHOLD = 25         # Show attempts that use 40+ cells
 
 # Path search limits (to avoid combinatorial explosion)
 MAX_PATHS_PER_WORD = 5              # Max paths per word considered in a combo
 MAX_PATH_COMBOS_PER_COMBO = 500     # Max path combinations per word-set combo
-
-# Spangram requirement:
-#   False  -> accept any clean theme-word layout (leftover may NOT be a valid spangram)
-#   True   -> require leftover cells to form a valid spangram
-REQUIRE_SPANGRAM = False
 
 # ============================================================================
 # SECTION 0: IMPROVEMENT HELPERS (Word Grouping & Trapped Letter Detection)
@@ -186,17 +180,6 @@ def has_trapped_letters(used_cells, all_cells_set, rows, cols, get_neighbors_fun
     
     Key concept: A region is a connected group of unused cells (via 8-directional adjacency).
     
-    Example of TRAPPED cells (BAD):
-        X X X X X X
-        X . . X X X     ← These 2 dots are DISCONNECTED from other unused cells
-        X X X X X X        (surrounded by X's)
-        . . . . . . .   ← This is a separate region (fine, has 7 cells)
-    
-    Example of NOT trapped (GOOD):
-        X X X X . .     ← These 2 dots connect to dots below
-        X . . . . .     ← All dots form ONE connected region
-        X X X X . .        (can reach any dot from any other dot)
-    
     Returns: (bool, reason)
         - True if there are trapped letters (BAD - prune this placement)
         - False if all regions are viable (GOOD - continue checking)
@@ -319,63 +302,6 @@ class StrandsSolver:
         
         return neighbors
     
-    def _iter_non_overlapping_placements_for_combo(self, combo_words, all_cells):
-        """Generate non-overlapping placements for a given word combo.
-
-        For a fixed set of theme words ([(word, relevance), ...]), this explores
-        combinations of their available paths via itertools.product, while
-        respecting MAX_PATHS_PER_WORD and MAX_PATH_COMBOS_PER_COMBO to avoid
-        combinatorial explosion.
-
-        Yields dicts of the form:
-            {
-                'placed_words': [(word, path), ...],
-                'used_cells': set((r, c), ...),
-                'leftover_cells': set((r, c), ...),
-            }
-        """
-        # Build per-word path lists (limited by MAX_PATHS_PER_WORD)
-        path_lists = []
-        for word, _rel in combo_words:
-            key = word.lower()
-            paths = self.found_words.get(key) or self.found_words.get(word)
-            if not paths:
-                # This word cannot actually be formed on the grid
-                return
-
-            limited_paths = paths[:MAX_PATHS_PER_WORD]
-            path_lists.append(limited_paths)
-
-        path_combo_count = 0
-
-        for path_tuple in itertools.product(*path_lists):
-            path_combo_count += 1
-            if path_combo_count > MAX_PATH_COMBOS_PER_COMBO:
-                break
-
-            used_cells = set()
-            placed_words = []
-            valid = True
-
-            for (word, _rel), path in zip(combo_words, path_tuple):
-                path_cells = set(path)
-                if path_cells & used_cells:
-                    valid = False
-                    break
-                placed_words.append((word, path))
-                used_cells |= path_cells
-
-            if not valid:
-                continue
-
-            leftover_cells = all_cells - used_cells
-
-            yield {
-                'placed_words': placed_words,
-                'used_cells': used_cells,
-                'leftover_cells': leftover_cells,
-            }
-
     def dfs(self, row, col, visited, current_word, path):
         """
         Depth-first search to find all valid words
@@ -412,63 +338,6 @@ class StrandsSolver:
         # Backtrack
         visited.remove((row, col))
         path.pop()
-
-    def _iter_non_overlapping_placements_for_combo(self, combo_words, all_cells):
-        """Generate non-overlapping placements for a given word combo.
-
-        For a fixed set of theme words ([(word, relevance), ...]), this explores
-        combinations of their available paths via itertools.product, while
-        respecting MAX_PATHS_PER_WORD and MAX_PATH_COMBOS_PER_COMBO to avoid
-        combinatorial explosion.
-
-        Yields dicts of the form:
-            {
-                'placed_words': [(word, path), ...],
-                'used_cells': set((r, c), ...),
-                'leftover_cells': set((r, c), ...),
-            }
-        """
-        # Build per-word path lists (limited by MAX_PATHS_PER_WORD)
-        path_lists = []
-        for word, _rel in combo_words:
-            key = word.lower()
-            paths = self.found_words.get(key) or self.found_words.get(word)
-            if not paths:
-                # This word cannot actually be formed on the grid
-                return
-
-            limited_paths = paths[:MAX_PATHS_PER_WORD]
-            path_lists.append(limited_paths)
-
-        path_combo_count = 0
-
-        for path_tuple in itertools.product(*path_lists):
-            path_combo_count += 1
-            if path_combo_count > MAX_PATH_COMBOS_PER_COMBO:
-                break
-
-            used_cells = set()
-            placed_words = []
-            valid = True
-
-            for (word, _rel), path in zip(combo_words, path_tuple):
-                path_cells = set(path)
-                if path_cells & used_cells:
-                    valid = False
-                    break
-                placed_words.append((word, path))
-                used_cells |= path_cells
-
-            if not valid:
-                continue
-
-            leftover_cells = all_cells - used_cells
-
-            yield {
-                'placed_words': placed_words,
-                'used_cells': used_cells,
-                'leftover_cells': leftover_cells,
-            }
     
     def find_all_words(self):
         """Find all valid words in the grid"""
@@ -479,130 +348,6 @@ class StrandsSolver:
                 self.dfs(row, col, set(), "", [])
         
         return self.found_words
-    
-    # ------------------------------------------------------------------------
-    # SPANGRAM DETECTION
-    # ------------------------------------------------------------------------
-    
-    def is_spangram(self, path):
-        """
-        Check if path is a spangram (touches opposite edges)
-        
-        Args:
-            path: List of (row, col) tuples
-            
-        Returns:
-            Boolean
-        """
-        rows_in_path = [pos[0] for pos in path]
-        cols_in_path = [pos[1] for pos in path]
-        
-        # Check if touches top AND bottom
-        touches_top = 0 in rows_in_path
-        touches_bottom = (self.rows - 1) in rows_in_path
-        
-        # Check if touches left AND right
-        touches_left = 0 in cols_in_path
-        touches_right = (self.cols - 1) in cols_in_path
-        
-        # Must touch BOTH opposite edges
-        return (touches_top and touches_bottom) or (touches_left and touches_right)
-    
-    def _cells_form_spangram(self, cells):
-        """Check if a set of cells could form a spangram"""
-        rows = [cell[0] for cell in cells]
-        cols = [cell[1] for cell in cells]
-        
-        touches_top = 0 in rows
-        touches_bottom = (self.rows - 1) in rows
-        touches_left = 0 in cols
-        touches_right = (self.cols - 1) in cols
-        
-        return (touches_top and touches_bottom) or (touches_left and touches_right)
-    
-    def _paths_are_adjacent(self, path1, path2):
-        """Check if two paths are adjacent (end of path1 touches start of path2)"""
-        end1 = path1[-1]
-        start2 = path2[0]
-        return start2 in self.get_neighbors(end1[0], end1[1])
-    
-    def find_spangrams(self):
-        """
-        Find all single-word spangrams
-        
-        Returns:
-            Dict of {word: [paths]}
-        """
-        spangrams = {}
-        for word, paths in self.found_words.items():
-            for path in paths:
-                if self.is_spangram(path):
-                    if word not in spangrams:
-                        spangrams[word] = []
-                    spangrams[word].append(path)
-        return spangrams
-    
-    def find_all_spangrams_including_multiword(self):
-        """
-        Find single AND multi-word spangrams
-        
-        Returns:
-            List of dicts with format:
-            {'word': 'text', 'paths': [path], 'length': n, 'type': 'single'/'multi'}
-        """
-        all_spangrams = []
-        
-        # 1. Single-word spangrams
-        single_spangrams = self.find_spangrams()
-        for word, paths in single_spangrams.items():
-            for path in paths:
-                all_spangrams.append({
-                    'word': word,
-                    'paths': [path],
-                    'length': len(path),
-                    'type': 'single'
-                })
-        
-        # 2. Multi-word spangrams (2-word combinations)
-        print("\n🔍 Checking for multi-word spangrams...")
-        words_list = [(w, paths) for w, paths in self.found_words.items() if len(w) >= 3]
-        
-        # Limit to top 200 most common words for performance
-        words_list = words_list[:200]
-        print(f"   Checking {len(words_list)} words (≥3 letters) for multi-word spangrams")
-        print(f"   Limited to top 200 most common words")
-        
-        multi_count = 0
-        checked_pairs = 0
-        
-        for (w1, paths1), (w2, paths2) in itertools.combinations(words_list, 2):
-            checked_pairs += 1
-            
-            for p1 in paths1:
-                for p2 in paths2:
-                    # Check if adjacent and no overlap
-                    if not (set(p1) & set(p2)) and self._paths_are_adjacent(p1, p2):
-                        combined = p1 + p2
-                        if self.is_spangram(combined):
-                            combo_word = f"{w1}_{w2}"
-                            all_spangrams.append({
-                                'word': combo_word,
-                                'paths': [p1, p2],
-                                'length': len(combined),
-                                'type': 'multi'
-                            })
-                            multi_count += 1
-                            if multi_count <= 10:
-                                print(f"   ✓ Found: {combo_word.upper()} ({len(combined)} cells)")
-        
-        if multi_count > 10:
-            print(f"   ... and {multi_count - 10} more multi-word spangrams")
-        
-        print(f"   Checked {checked_pairs} word pairs, found {multi_count} multi-word spangrams")
-        
-        # 3. TODO: 3-word spangrams (optional, rare)
-        
-        return all_spangrams
     
     # ------------------------------------------------------------------------
     # THEME MATCHING (Claude API)
@@ -699,7 +444,7 @@ Return JSON:
             
             if response.status_code != 200:
                 print(f"❌ Claude API Error: {response.status_code}")
-                print(f"   Response: {response.text[:200]}")  # Show first 200 chars
+                print(f"   Response: {response.text[:200]}")
                 if response.status_code == 401:
                     print("📋 API Key Issue:")
                     print("  1. Get key from: https://console.anthropic.com/")
@@ -716,7 +461,7 @@ Return JSON:
                 print(f"   Full response: {data}")
                 return {}
             
-            # IMPROVED: Extract JSON from response
+            # Extract JSON from response
             # Claude sometimes adds explanation text before/after the JSON
             
             # First, try to find JSON in markdown code blocks
@@ -819,20 +564,6 @@ Return JSON:
             traceback.print_exc()
             return {}
     
-    def find_theme_spangrams(self):
-        """Find spangrams that match the theme"""
-        if not self.theme_matched_words:
-            return {}
-        
-        all_spangrams = self.find_spangrams()
-        theme_spangrams = {}
-        
-        for word in all_spangrams:
-            if word in self.theme_matched_words:
-                theme_spangrams[word] = all_spangrams[word]
-        
-        return theme_spangrams
-    
     # ========================================================================
     # SOLVING STRATEGY - ADAPTIVE CLUSTERING WITH MULTIPLE INTERPRETATIONS
     # ========================================================================
@@ -928,7 +659,7 @@ Return exactly {count} diverse interpretations."""
     def find_words_for_interpretation(self, interpretation, limit=20):
         """
         Find words in grid matching a specific interpretation
-        NOW WITH WORD GROUPING to avoid testing plurals separately!
+        Uses word grouping to avoid testing plurals separately
         
         Args:
             interpretation: Dict with theme, expected_category, etc.
@@ -1023,7 +754,7 @@ Return {api_limit} words ranked by relevance."""
             if filtered_count > 0:
                 print(f"     ⚠️  Filtered out {filtered_count} words not in grid")
             
-            # IMPROVED: Group variants and select best representatives
+            # Group variants and select best representatives
             word_groups = group_word_variants(valid_words)
             print(f"     📦 Grouped into {len(word_groups)} word families")
             
@@ -1065,13 +796,13 @@ Return {api_limit} words ranked by relevance."""
     
     def solve_adaptive_clustering(self, theme, word_count=8):
         """
-        IMPROVED: Multi-interpretation adaptive clustering
+        Multi-interpretation adaptive clustering
         
-        YOUR KEY IMPROVEMENTS:
+        Strategy:
         1. Gets 3 different theme interpretations
         2. For each, finds 15-20 matching words
-        3. Tries to solve with each interpretation
-        4. NO spangram search in API - emerges from leftover
+        3. Tries to place words on grid
+        4. Uses early pruning for trapped letters
         
         Returns:
             Solution dict or None
@@ -1080,7 +811,7 @@ Return {api_limit} words ranked by relevance."""
         print("🎯 ADAPTIVE CLUSTERING SOLVER (MULTI-INTERPRETATION)")
         print("="*70)
         print(f"Theme: '{theme}'")
-        print(f"Strategy: Try 3 interpretations → Find words → Place → Leftover = spangram\n")
+        print(f"Strategy: Try interpretations → Find words → Place on grid\n")
         
         max_batches = 3
         batch_size = 3
@@ -1173,12 +904,11 @@ Return {api_limit} words ranked by relevance."""
         Uses a flexible approach:
         - Try placing different numbers of theme words
         - Early pruning for trapped letters
-        - Validate leftover as spangram (final step)
-        - Uses HIGH_CONFIDENCE_ATTEMPTS if cluster score is high
+        - Validate that all cells are used
 
         Args:
             cluster: Dict with words, interpretation, score
-            word_count: Target number of solutions (including spangram)
+            word_count: Target number of words
 
         Returns:
             Solution dict or None
@@ -1193,17 +923,14 @@ Return {api_limit} words ranked by relevance."""
         # Sort words by relevance (highest first)
         sorted_words = sorted(words, key=lambda x: x[1], reverse=True)
 
-        # Expect roughly (word_count - 1) theme words + 1 spangram
-        target_theme_words = max(1, word_count - 1)
-
-        # Try a band around the target
-        min_try = max(3, target_theme_words - 3)
-        max_try = min(len(sorted_words), target_theme_words + 2)
+        # Try a range of word counts
+        min_try = max(3, word_count - 3)
+        max_try = min(len(sorted_words), word_count + 3)
 
         attempts_per_n = list(range(min_try, max_try + 1))
-        attempts_per_n.sort(key=lambda x: abs(x - target_theme_words))  # Prioritize target-ish sizes
+        attempts_per_n.sort(key=lambda x: abs(x - word_count))  # Prioritize target size
 
-        print(f"  Trying to place {min_try}-{max_try} theme words...")
+        print(f"  Trying to place {min_try}-{max_try} words...")
 
         # Use HIGH_CONFIDENCE_ATTEMPTS threshold
         if cluster_score >= HIGH_CONFIDENCE_THRESHOLD:
@@ -1216,14 +943,14 @@ Return {api_limit} words ranked by relevance."""
         total_attempts = 0
         pruned_count = 0
 
-        # Track the best near-miss layout so we can visualize it on failure
+        # Track the best attempt
         best_attempt = None
 
         all_cells = {(r, c) for r in range(self.rows) for c in range(self.cols)}
 
-        # Try each word-count size in attempts_per_n
+        # Try each word-count size
         for n_words in attempts_per_n:
-            print(f"\n  → Attempting with {n_words} theme words...")
+            print(f"\n  → Attempting with {n_words} words...")
 
             if n_words > len(sorted_words):
                 continue
@@ -1247,13 +974,12 @@ Return {api_limit} words ranked by relevance."""
                     print(f"    ⚠️  Total limit reached ({max_total_attempts:,} attempts)")
                     break
 
-                # Try to place these words greedily (one path per word, no overlaps)
+                # Try to place these words (one path per word, no overlaps)
                 placed_words = []
                 used_cells = set()
 
                 for word, _rel in combo_words:
                     if word not in self.found_words:
-                        # This word cannot be drawn on the grid at all
                         placed = False
                         break
 
@@ -1267,10 +993,9 @@ Return {api_limit} words ranked by relevance."""
                             break
 
                     if not placed:
-                        # Couldn't place this word without overlap
                         break
 
-                # Did we actually place all n_words?
+                # Did we place all n_words?
                 if len(placed_words) != n_words:
                     continue
 
@@ -1284,7 +1009,6 @@ Return {api_limit} words ranked by relevance."""
                 )
 
                 if has_trap:
-                    # Even if it's trapped, it might still be our "best" attempt so far
                     leftover_cells = all_cells - used_cells
                     cells_used = len(used_cells)
 
@@ -1292,8 +1016,6 @@ Return {api_limit} words ranked by relevance."""
                         "placed_words": placed_words,
                         "leftover_cells": leftover_cells,
                         "cells_used": cells_used,
-                        "spangram": "",
-                        "spangram_type": "unknown",
                         "failure_reason": trap_reason,
                     }
 
@@ -1304,244 +1026,128 @@ Return {api_limit} words ranked by relevance."""
                             self._visualize_grid_state(placed_words, leftover_cells)
 
                     pruned_count += 1
-                    continue  # Skip this combination - it has trapped letters
+                    continue
 
-                # No traps – check leftover and spangram
+                # No traps – check if we used all cells
                 leftover_cells = all_cells - used_cells
-                if not leftover_cells:
-                    # No room left for spangram; still record as near-miss
-                    cells_used = len(used_cells)
-                    attempt_info = {
-                        "placed_words": placed_words,
-                        "leftover_cells": leftover_cells,
-                        "cells_used": cells_used,
-                        "spangram": "",
-                        "spangram_type": "unknown",
-                        "failure_reason": "No leftover cells for spangram",
-                    }
-                    if best_attempt is None or cells_used > best_attempt["cells_used"]:
-                        best_attempt = attempt_info
-                        if SHOW_CLOSE_ATTEMPTS and cells_used >= CLOSE_ATTEMPT_THRESHOLD:
-                            print("\n  🔍 Close attempt (no leftover cells):")
-                            self._visualize_grid_state(placed_words, leftover_cells)
-                    continue
+                cells_used = len(used_cells)
 
-                # Validate leftover as spangram
-                validation = self._validate_leftover_spangram(leftover_cells, placed_words)
-
-                if not validation.get("valid"):
-                    # Record as near-miss
-                    cells_used = len(used_cells)
-                    attempt_info = {
-                        "placed_words": placed_words,
-                        "leftover_cells": leftover_cells,
-                        "cells_used": cells_used,
-                        "spangram": validation.get("spangram", ""),
-                        "spangram_type": validation.get("type", "unknown"),
-                        "failure_reason": validation.get("reason", "Spangram invalid"),
-                    }
-                    if best_attempt is None or cells_used > best_attempt["cells_used"]:
-                        best_attempt = attempt_info
-                        if SHOW_CLOSE_ATTEMPTS and cells_used >= CLOSE_ATTEMPT_THRESHOLD:
-                            print("\n  🔍 Close attempt (spangram invalid):")
-                            self._visualize_grid_state(placed_words, leftover_cells)
-                    continue
-
-                # SUCCESS: valid spangram & no traps
-                spangram_text = validation["spangram"]
-                spangram_type = validation.get("type", "single")
-
-                print(f"\n  ✅ SOLUTION FOUND!")
-                print(f"     Placed {len(placed_words)} theme words: "
-                    f"{', '.join([w.upper() for w, _ in placed_words])}")
-                print(f"     Spangram: {spangram_text.upper()}")
-                print(f"     Total cells: {len(used_cells) + len(leftover_cells)}/{self.rows * self.cols}")
-
-                self._show_final_solution({
+                # Record as attempt
+                attempt_info = {
                     "placed_words": placed_words,
-                    "spangram": spangram_text,
-                    "spangram_type": spangram_type,
                     "leftover_cells": leftover_cells,
-                    "cells_used": len(used_cells) + len(leftover_cells),
-                })
-
-                return {
-                    "theme_words": placed_words,
-                    "spangram": spangram_text,
-                    "spangram_cells": leftover_cells,
-                    "total_cells": len(used_cells) + len(leftover_cells),
-                    "cluster": cluster,
-                    "validation_type": spangram_type,
-                    "pruned_attempts": pruned_count,
+                    "cells_used": cells_used,
+                    "failure_reason": f"{len(leftover_cells)} cells unused" if leftover_cells else None,
                 }
+
+                if best_attempt is None or cells_used > best_attempt["cells_used"]:
+                    best_attempt = attempt_info
+                    if SHOW_CLOSE_ATTEMPTS and cells_used >= CLOSE_ATTEMPT_THRESHOLD:
+                        print("\n  🔍 Close attempt:")
+                        self._visualize_grid_state(placed_words, leftover_cells)
+
+                # Check if we used ALL cells (success!)
+                if len(leftover_cells) == 0:
+                    print(f"\n  ✅ SOLUTION FOUND!")
+                    print(f"     Placed {len(placed_words)} words: "
+                        f"{', '.join([w.upper() for w, _ in placed_words])}")
+                    print(f"     Total cells: {cells_used}/{self.rows * self.cols}")
+
+                    self._show_final_solution({
+                        "placed_words": placed_words,
+                        "leftover_cells": leftover_cells,
+                        "cells_used": cells_used,
+                    })
+                    
+                    # Get theme for spangram identification
+                    theme = self.puzzle_info.get('theme', '')
+                    
+                    # PHASE 2: Identify spangram
+                    spangram_info = self.identify_spangram(
+                        placed_words,
+                        word_count,  # expected_count
+                        theme
+                    )
+
+                    return {
+                        "theme_words": spangram_info['theme_words'],
+                        "spangram_words": spangram_info['spangram_words'],
+                        "spangram_type": spangram_info['spangram_type'],
+                        "spangram_reasoning": spangram_info['reasoning'],
+                        "total_cells": cells_used,
+                        "cluster": cluster,
+                        "pruned_attempts": pruned_count,
+                    }
 
             if total_attempts >= max_total_attempts:
                 break
 
-        # If we reach here, no full valid solution was found
+        # No solution found
         print(f"\n  ✗ No valid solution found for this cluster (tried {total_attempts:,} combinations, pruned {pruned_count})")
         print(f"     Pruning saved {pruned_count:,} futile validations ({100*pruned_count//max(1, total_attempts)}% of attempts)")
 
-        # Show the best attempt if we have one
+        # Show the best attempt
         if best_attempt is not None:
-            print("\n  🔍 BEST ATTEMPT (no full solution):")
+            print("\n  🔍 BEST ATTEMPT (no complete solution):")
             self._show_best_attempt(best_attempt, total_attempts)
 
-        return None
 
-    
-    def _try_place_word_combination(self, word_combo, word_count, show_progress=False):
-        """
-        Try to place a specific combination of words on the grid
-        
-        Returns result dict with:
-        - placed_words: List of (word, path) tuples
-        - leftover_cells: Set of unused cells
-        - cells_used: Number of cells used
-        - is_solution: Whether this is a valid complete solution
-        """
-        # Extract just the word names
-        word_names = [w for w, _ in word_combo]
-        
-        # Try to place each word without overlaps
-        placed_words = []
-        used_cells = set()
-        
-        for word in word_names:
-            if word not in self.found_words:
-                continue
+        # Try to fill leftover regions with theme words
+        if best_attempt and best_attempt['leftover_cells']:
+            print(f"\n  💡 Attempting to fill leftover regions with theme words...")
             
-            # Try each path for this word
-            placed = False
-            for path in self.found_words[word]:
-                path_cells = set(path)
-                
-                # Check if this path overlaps with already placed words
-                if not (path_cells & used_cells):
-                    placed_words.append((word, path))
-                    used_cells |= path_cells
-                    placed = True
-                    break
+            theme = self.puzzle_info.get('theme', '')
+            leftover_words = self._analyze_leftover_regions(
+                best_attempt['leftover_cells'],
+                best_attempt['placed_words'],
+                theme
+            )
             
-            if not placed:
-                # Couldn't place this word without overlap
-                return None
-        
-        # Calculate leftover cells
-        all_cells = set((r, c) for r in range(self.rows) for c in range(self.cols))
-        leftover_cells = all_cells - used_cells
-        cells_used = len(used_cells)
-        
-        # Validate leftover as spangram
-        validation = self._validate_leftover_spangram(leftover_cells, placed_words)
-        
-        return {
-            'placed_words': placed_words,
-            'leftover_cells': leftover_cells,
-            'cells_used': cells_used,
-            'is_solution': validation['valid'],
-            'spangram': validation.get('spangram', ''),
-            'spangram_type': validation.get('type', 'unknown'),
-            'failure_reason': validation.get('reason', '')
-        }
-    
-    def _validate_leftover_spangram(self, leftover_cells, placed_words):
-        """
-        Validate if leftover cells can form valid word(s)
-        
-        IMPROVED: Actually searches for valid words in the leftover cells
-        instead of just trying to read them as one path!
-        
-        Returns dict with 'valid', 'spangram', 'type', 'reason'
-        """
-        if not leftover_cells:
-            return {'valid': False, 'reason': 'No leftover cells'}
-        
-        # NEW APPROACH: Search for all valid words in leftover cells
-        leftover_words = self._find_words_in_cells(leftover_cells, min_length=4)
-        
-        if not leftover_words:
-            # Try reading as single path (fallback)
-            components = self._find_connected_components(leftover_cells)
-            if len(components) == 1:
-                text = self._read_component_text(components[0])
-                return {
-                    'valid': False,
-                    'reason': f'No valid words found in leftover. Read as: "{text}"'
-                }
-            else:
-                return {
-                    'valid': False,
-                    'reason': f'No valid words found in {len(components)} components'
-                }
-        
-        # Try to place words in leftover to use all cells
-        # This is similar to the main solving loop but for leftover only
-        leftover_word_list = [(word, 1.0) for word in leftover_words.keys()]
-        
-        # Try to find a combination that uses ALL leftover cells
-        for n_words in range(1, len(leftover_word_list) + 1):
-            for word_combo in itertools.combinations(leftover_word_list, n_words):
-                # Try to place these words
-                placed = []
-                used = set()
+            if leftover_words:
+                print(f"\n  📝 Selected {len(leftover_words)} word(s) from leftover regions")
                 
-                for word, _ in word_combo:
-                    placed_word = False
-                    for path in leftover_words[word]:
-                        path_set = set(path)
-                        if not (path_set & used):  # No overlap
-                            placed.append((word, path))
-                            used |= path_set
-                            placed_word = True
-                            break
+                # Combine placed words with leftover words
+                combined_words = best_attempt['placed_words'] + leftover_words
+                
+                # Check if this uses all cells
+                used_cells = set()
+                for word, path in combined_words:
+                    used_cells.update(path)
+                
+                total_cells = self.rows * self.cols
+                
+                if len(used_cells) == total_cells:
+                    print(f"\n  ✅ SOLUTION FOUND by filling leftover regions!")
+                    print(f"     Total words: {len(combined_words)}")
+                    print(f"     Cells used: {len(used_cells)}/{total_cells}")
                     
-                    if not placed_word:
-                        break
-                
-                # Check if we used ALL leftover cells
-                if len(placed) == n_words and used == leftover_cells:
-                    # SUCCESS! All leftover cells form valid word(s)
-                    spangram_text = '_'.join([w for w, _ in placed])
+                    self._show_final_solution({
+                        "placed_words": combined_words,
+                        "leftover_cells": set(),
+                        "cells_used": len(used_cells),
+                    })
+                    
+                    # PHASE 2: Identify spangram
+                    spangram_info = self.identify_spangram(
+                        combined_words,
+                        word_count,  # expected_count
+                        theme
+                    )
+                    
                     return {
-                        'valid': True,
-                        'spangram': spangram_text,
-                        'type': 'multi' if len(placed) > 1 else 'single',
-                        'components': len(placed),
-                        'words': placed
+                        "theme_words": spangram_info['theme_words'],
+                        "spangram_words": spangram_info['spangram_words'],
+                        "spangram_type": spangram_info['spangram_type'],
+                        "spangram_reasoning": spangram_info['reasoning'],
+                        "total_cells": len(used_cells),
+                        "cluster": cluster,
+                        "pruned_attempts": pruned_count,
                     }
-        
-        # Couldn't use all cells
-        # Return best attempt (most cells covered)
-        best_coverage = 0
-        best_words = []
-        
-        for n_words in range(1, len(leftover_word_list) + 1):
-            for word_combo in itertools.combinations(leftover_word_list, n_words):
-                placed = []
-                used = set()
-                
-                for word, _ in word_combo:
-                    placed_word = False
-                    for path in leftover_words[word]:
-                        path_set = set(path)
-                        if not (path_set & used):
-                            placed.append((word, path))
-                            used |= path_set
-                            placed_word = True
-                            break
-                    
-                    if not placed_word:
-                        break
-                
-                if len(used) > best_coverage:
-                    best_coverage = len(used)
-                    best_words = [w for w, _ in placed]
-        
-        return {
-            'valid': False,
-            'reason': f'Found words {best_words} but only covers {best_coverage}/{len(leftover_cells)} cells'
-        }
+                else:
+                    print(f"\n  ⚠️  Leftover words found but don't complete the grid")
+                    print(f"     Cells used: {len(used_cells)}/{total_cells}")
+
+        return None
     
     # ========================================================================
     # VISUALIZATION METHODS
@@ -1573,24 +1179,36 @@ Return {api_limit} words ranked by relevance."""
         
         # Show leftover info
         if leftover_cells:
-            components = self._find_connected_components(leftover_cells)
-            print(f"\n  Leftover: {len(leftover_cells)} cells in {len(components)} component(s)")
+            print(f"\n  Leftover: {len(leftover_cells)} cells")
             
-            for i, comp in enumerate(components, 1):
-                text = self._read_component_text(comp)
-                is_valid = self.trie.search(text)
-                status = "✓" if is_valid else "✗"
-                print(f"    Component {i}: '{text.upper()}' ({len(comp)} cells) {status}")
+            # Find valid words in leftover cells
+            leftover_words = self._find_words_in_cells(leftover_cells, min_length=4)
+            
+            if leftover_words:
+                print(f"  Valid words found in leftover: {len(leftover_words)}")
+                # Show top 5 words by length
+                sorted_words = sorted(leftover_words.keys(), key=len, reverse=True)
+                for word in sorted_words[:5]:
+                    print(f"    • {word.upper()} ({len(word)} letters)")
+            else:
+                print(f"  No valid words found in leftover cells")
+            
+            # Show components
+            components = self._find_connected_components(leftover_cells)
+            if len(components) > 1:
+                print(f"  Split into {len(components)} separate regions:")
+                for i, comp in enumerate(components, 1):
+                    # Show what letters are in each component
+                    text = self._read_component_text(comp)
+                    print(f"    Region {i}: {len(comp)} cells - '{text.upper()}'")
     
     def _show_final_solution(self, result):
         """Display the final solution with full details"""
         print("\n" + "="*70)
-        print("📋 FINAL SOLUTION")
+        print("PHASE 1 RESULTS")
         print("="*70)
         
         placed_words = result['placed_words']
-        spangram = result['spangram']
-        spangram_type = result['spangram_type']
         
         # Show grid
         print("\nFinal grid:")
@@ -1610,14 +1228,6 @@ Return {api_limit} words ranked by relevance."""
                     row_str += f" {letter.lower()} "
             print(row_str)
         
-        # Show spangram
-        print(f"\n🎯 Spangram: {spangram.upper()}")
-        if spangram_type == 'multi':
-            parts = spangram.split('_')
-            print(f"   Type: Multi-word ({len(parts)} words: {', '.join(p.upper() for p in parts)})")
-        else:
-            print(f"   Type: Single word")
-        
         # Show theme words
         print(f"\n📝 Theme words placed ({len(placed_words)}):")
         for i, (word, path) in enumerate(placed_words, 1):
@@ -1628,7 +1238,6 @@ Return {api_limit} words ranked by relevance."""
         total_cells = self.rows * self.cols
         print(f"\n✓ Total cells used: {result['cells_used']}/{total_cells} ({result['cells_used']/total_cells:.0%})")
         print("✓ All words form valid paths")
-        print("✓ Spangram touches opposite edges")
     
     def _show_best_attempt(self, best_attempt, total_attempts):
         """Show the best attempt even though it failed"""
@@ -1648,13 +1257,13 @@ Return {api_limit} words ranked by relevance."""
         
         # Explain why it failed
         reason = best_attempt.get('failure_reason', 'Unknown')
-        print(f"\n  ❌ Why it failed: {reason}")
+        if reason:
+            print(f"\n  ❌ Why it failed: {reason}")
         
         print(f"\n  💡 Suggestions:")
         print(f"     1. Theme interpretation might need adjustment")
         print(f"     2. Some theme words may be incorrect")
         print(f"     3. Try different word combinations manually")
-        print(f"     4. Check if dictionary has all needed words")
 
     # ------------------------------------------------------------------------
     # UTILITY METHODS
@@ -1697,6 +1306,7 @@ Return {api_limit} words ranked by relevance."""
     def _read_component_text(self, cells):
         """
         Read text from a component using DFS
+        Used for visualization/debugging
         
         Returns:
             String of letters in the component
@@ -1786,7 +1396,559 @@ Return {api_limit} words ranked by relevance."""
             dfs_search(row, col, set(), "", [])
         
         return found_words
-    
+
+
+    def _analyze_leftover_regions(self, leftover_cells, placed_words, theme):
+        """
+        Analyze disconnected leftover regions and select theme-appropriate words
+        
+        For each disconnected region:
+        1. Find all valid words via DFS
+        2. Use API to select which word(s) fit the theme
+        
+        Args:
+            leftover_cells: Set of unused cells
+            placed_words: List of (word, path) tuples already placed
+            theme: Puzzle theme string
+            
+        Returns:
+            List of (word, path) tuples that should fill the leftover regions
+        """
+        if not leftover_cells:
+            return []
+        
+        # Find disconnected regions
+        regions = self._find_connected_components(leftover_cells)
+        
+        if not regions:
+            return []
+        
+        print(f"\n  🔍 Analyzing {len(regions)} leftover region(s)...")
+        
+        selected_words = []
+        
+        # Process each region separately
+        for i, region in enumerate(regions, 1):
+            print(f"\n    Region {i}: {len(region)} cells")
+            
+            # Get the letters in this region
+            region_letters = [self.grid[r][c] for r, c in region]
+            print(f"      Letters: {', '.join(region_letters)}")
+            
+            # Find all valid words in this region
+            region_words = self._find_words_in_cells(region, min_length=4)
+            
+            if not region_words:
+                print(f"      ⚠️  No valid words found in region")
+                continue
+            
+            # Show found words
+            sorted_region_words = sorted(region_words.keys(), key=len, reverse=True)
+            print(f"      Found {len(region_words)} valid words:")
+            for word in sorted_region_words[:10]:
+                print(f"        • {word.upper()} ({len(word)} letters)")
+            
+            # Ask API to select which word(s) fit the theme
+            selected_region_words = self._select_words_for_region(
+                region_words=region_words,
+                region_letters=region_letters,
+                placed_words=placed_words,
+                theme=theme,
+                region_size=len(region)
+            )
+            
+            if selected_region_words:
+                for word, path in selected_region_words:
+                    print(f"      ✓ Selected: {word.upper()} ({len(path)} cells)")
+                    selected_words.append((word, path))
+            else:
+                print(f"      ✗ API couldn't select theme-appropriate word(s)")
+        
+        return selected_words
+
+    def _select_words_for_region(self, region_words, region_letters, placed_words, theme, region_size):
+        """
+        Use API to select which word(s) from a region fit the theme
+        
+        Args:
+            region_words: Dict of {word: [paths]} found in the region
+            region_letters: List of letters available in the region
+            placed_words: List of (word, path) already placed
+            theme: Puzzle theme string
+            region_size: Number of cells in the region
+            
+        Returns:
+            List of (word, path) tuples, or empty list
+        """
+        # Prepare word list with letter usage info
+        word_list = list(region_words.keys())
+        word_list.sort(key=len, reverse=True)
+        
+        # Build word descriptions showing letter usage
+        word_descriptions = []
+        for word in word_list[:20]:
+            word_len = len(word)
+            if word_len == region_size:
+                word_descriptions.append(f"  - {word.upper()} ({word_len} letters) - uses all letters")
+            else:
+                unused_count = region_size - word_len
+                word_descriptions.append(f"  - {word.upper()} ({word_len} letters) - leaves {unused_count} letters unused")
+        
+        # Get already placed word names
+        placed_word_names = [w.upper() for w, _ in placed_words]
+        
+        # Build prompt
+        prompt = f"""You are solving a NYT Strands puzzle with theme: "{theme}"
+
+Already placed theme words: {', '.join(placed_word_names)}
+
+I have a leftover region with {region_size} unused cells containing these letters:
+{', '.join(region_letters)}
+
+Valid words that can be formed from these letters:
+{chr(10).join(word_descriptions)}
+
+Which word(s) should fill this region to complete the theme?
+
+Requirements:
+- Selected word(s) must use ALL {region_size} letters in the region
+- Words must fit the theme
+- Letters cannot be reused
+
+Respond with VALID JSON ONLY:
+{{
+"selected_words": ["word1", "word2"],
+"reasoning": "why these words fit the theme and use all letters"
+}}
+
+If only one word is needed, return a list with one word.
+If multiple words are needed to use all {region_size} letters, return multiple words."""
+
+        try:
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": os.environ.get("ANTHROPIC_API_KEY", ""),
+                    "anthropic-version": "2023-06-01"
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 2000,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                print(f"        ⚠️  API error: {response.status_code}")
+                return []
+            
+            data = response.json()
+            response_text = data['content'][0]['text'].strip()
+            
+            # Extract JSON
+            if not response_text.startswith('{'):
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}')
+                if start_idx != -1 and end_idx != -1:
+                    response_text = response_text[start_idx:end_idx+1]
+            
+            result = json.loads(response_text)
+            selected_words = result.get('selected_words', [])
+            reasoning = result.get('reasoning', '')
+            
+            print(f"        API reasoning: {reasoning}")
+            
+            # Validate and return selected words with their paths
+            validated_words = []
+            for word_str in selected_words:
+                word_lower = word_str.lower()
+                if word_lower in region_words:
+                    # Take the first path for this word
+                    validated_words.append((word_lower, region_words[word_lower][0]))
+                else:
+                    print(f"        ⚠️  API selected '{word_str}' which is not in region")
+            
+            return validated_words
+            
+        except Exception as e:
+            print(f"        ⚠️  Error selecting words: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    """
+    COMPLETE INTEGRATION GUIDE FOR SPANGRAM IDENTIFICATION
+    ======================================================
+
+    This guide shows exactly where to add code to your solver.py file.
+    """
+
+    # ==============================================================================
+    # STEP 1: Add new methods after _select_words_for_region() (around line 1550)
+    # ==============================================================================
+
+    # ADD THESE 6 METHODS RIGHT AFTER _select_words_for_region() ends:
+
+    def identify_spangram(self, placed_words, expected_count, theme):
+        """
+        Identify which word(s) form the spangram from placed words
+        
+        A spangram must:
+        1. Span opposite edges (top-to-bottom OR left-to-right)
+        2. Be physically connected if multi-word
+        
+        Args:
+            placed_words: List of (word, path) tuples - all placed words
+            expected_count: Expected total word count (e.g., 8)
+            theme: Puzzle theme string
+            
+        Returns:
+            Dict with:
+            - 'spangram_words': List of (word, path) forming spangram
+            - 'theme_words': List of (word, path) that are NOT spangram
+            - 'spangram_type': 'single' or 'multi-word'
+            - 'reasoning': Why this is the spangram
+        """
+        print(f"\n{'='*70}")
+        print("PHASE 2: SPANGRAM IDENTIFICATION")
+        print(f"{'='*70}")
+        
+        total_placed = len(placed_words)
+        
+        # Calculate how many words form the spangram
+        # If we placed 9 words but expected 8, then 2 words form a multi-word spangram
+        # Formula: spangram_word_count = total_placed - expected_count + 1
+        spangram_word_count = total_placed - expected_count + 1
+        
+        print(f"\n📊 Analysis:")
+        print(f"   Total words placed: {total_placed}")
+        print(f"   Expected word count: {expected_count}")
+        print(f"   Spangram word count: {spangram_word_count}")
+        
+        if spangram_word_count < 1:
+            print(f"\n⚠️  Error: Calculated spangram word count is {spangram_word_count}")
+            print(f"   This shouldn't happen - returning first word as spangram")
+            return {
+                'spangram_words': [placed_words[0]],
+                'theme_words': placed_words[1:],
+                'spangram_type': 'single',
+                'reasoning': 'Error in calculation - defaulted to first word'
+            }
+        
+        # Find all valid spangram candidates
+        print(f"\n🔍 Finding spangram candidates ({spangram_word_count} word(s))...")
+        
+        candidates = self._find_spangram_candidates(placed_words, spangram_word_count)
+        
+        print(f"   Found {len(candidates)} valid candidate(s)")
+        
+        if len(candidates) == 0:
+            print(f"\n❌ No valid spangram found!")
+            print(f"   This shouldn't happen if solution is correct")
+            return {
+                'spangram_words': [],
+                'theme_words': placed_words,
+                'spangram_type': 'unknown',
+                'reasoning': 'No valid spangram candidates found'
+            }
+        
+        if len(candidates) == 1:
+            # Only one candidate - this is our spangram
+            selected = candidates[0]
+            spangram_words = selected['words']
+            theme_words = [w for w in placed_words if w not in spangram_words]
+            
+            print(f"\n✅ Spangram identified (only one valid candidate):")
+            for word, path in spangram_words:
+                print(f"   • {word.upper()} ({len(path)} cells)")
+            
+            return {
+                'spangram_words': spangram_words,
+                'theme_words': theme_words,
+                'spangram_type': selected['type'],
+                'reasoning': selected['reasoning']
+            }
+        
+        # Multiple candidates - use API to select the best one
+        print(f"\n🤖 Multiple candidates found - using API to select best...")
+        
+        selected = self._select_best_spangram(candidates, theme, placed_words)
+        
+        if selected:
+            spangram_words = selected['words']
+            theme_words = [w for w in placed_words if w not in spangram_words]
+            
+            print(f"\n✅ Spangram identified via API:")
+            for word, path in spangram_words:
+                print(f"   • {word.upper()} ({len(path)} cells)")
+            print(f"   Reasoning: {selected['reasoning']}")
+            
+            return {
+                'spangram_words': spangram_words,
+                'theme_words': theme_words,
+                'spangram_type': selected['type'],
+                'reasoning': selected['reasoning']
+            }
+        else:
+            # API failed - default to first candidate
+            print(f"\n⚠️  API selection failed - using first candidate")
+            selected = candidates[0]
+            spangram_words = selected['words']
+            theme_words = [w for w in placed_words if w not in spangram_words]
+            
+            return {
+                'spangram_words': spangram_words,
+                'theme_words': theme_words,
+                'spangram_type': selected['type'],
+                'reasoning': 'API selection failed - defaulted to first candidate'
+            }
+
+
+    def _find_spangram_candidates(self, placed_words, spangram_word_count):
+        """
+        Find all valid spangram candidates
+        
+        Args:
+            placed_words: List of (word, path) tuples
+            spangram_word_count: How many words form the spangram
+            
+        Returns:
+            List of candidate dicts with:
+            - 'words': List of (word, path) tuples
+            - 'type': 'single' or 'multi-word'
+            - 'reasoning': Why this is a valid spangram
+        """
+        candidates = []
+        
+        # Try all combinations of N words
+        for word_combo in itertools.combinations(placed_words, spangram_word_count):
+            # Check if this combination forms a valid spangram
+            is_valid, reasoning = self._is_valid_spangram(word_combo)
+            
+            if is_valid:
+                candidates.append({
+                    'words': list(word_combo),
+                    'type': 'single' if spangram_word_count == 1 else 'multi-word',
+                    'reasoning': reasoning
+                })
+        
+        return candidates
+
+
+    def _is_valid_spangram(self, word_combo):
+        """
+        Check if a combination of words forms a valid spangram
+        
+        Args:
+            word_combo: Tuple of (word, path) tuples
+            
+        Returns:
+            (is_valid, reasoning) tuple
+        """
+        # Get all cells used by these words
+        all_cells = set()
+        for word, path in word_combo:
+            all_cells.update(path)
+        
+        # Check 1: If multi-word, are they physically connected?
+        if len(word_combo) > 1:
+            is_connected = self._are_words_connected(word_combo)
+            if not is_connected:
+                return False, "Words are not physically connected"
+        
+        # Check 2: Do they span opposite edges?
+        spans_edges, edge_info = self._spans_opposite_edges(all_cells)
+        
+        if not spans_edges:
+            return False, "Does not span opposite edges"
+        
+        # Valid spangram!
+        word_names = " + ".join([w.upper() for w, _ in word_combo])
+        return True, f"Spans {edge_info}, words: {word_names}"
+
+
+    def _are_words_connected(self, word_combo):
+        """
+        Check if words in a multi-word combination are physically connected
+        
+        Multi-word spangrams must connect: last letter of word N is adjacent to 
+        first letter of word N+1
+        
+        Args:
+            word_combo: Tuple of (word, path) tuples
+            
+        Returns:
+            Boolean - True if all words are connected in sequence
+        """
+        # For each pair of consecutive words
+        for i in range(len(word_combo) - 1):
+            word1, path1 = word_combo[i]
+            word2, path2 = word_combo[i + 1]
+            
+            # Get last cell of word1 and first cell of word2
+            last_cell_word1 = path1[-1]
+            first_cell_word2 = path2[0]
+            
+            # Check if they're adjacent (8-directional)
+            if not self._are_cells_adjacent(last_cell_word1, first_cell_word2):
+                # Try the reverse - maybe word2 connects to word1
+                last_cell_word2 = path2[-1]
+                first_cell_word1 = path1[0]
+                
+                if not self._are_cells_adjacent(last_cell_word2, first_cell_word1):
+                    return False
+        
+        return True
+
+
+    def _are_cells_adjacent(self, cell1, cell2):
+        """
+        Check if two cells are adjacent (8-directional)
+        
+        Args:
+            cell1, cell2: (row, col) tuples
+            
+        Returns:
+            Boolean
+        """
+        r1, c1 = cell1
+        r2, c2 = cell2
+        
+        # Adjacent if within 1 step in any direction
+        return abs(r1 - r2) <= 1 and abs(c1 - c2) <= 1 and (r1, c1) != (r2, c2)
+
+
+    def _spans_opposite_edges(self, cells):
+        """
+        Check if a set of cells spans opposite edges of the grid
+        
+        Args:
+            cells: Set of (row, col) tuples
+            
+        Returns:
+            (spans, edge_description) tuple
+        """
+        # Get min/max positions
+        rows = [r for r, c in cells]
+        cols = [c for r, c in cells]
+        
+        min_row = min(rows)
+        max_row = max(rows)
+        min_col = min(cols)
+        max_col = max(cols)
+        
+        # Check if spans top-to-bottom
+        touches_top = (min_row == 0)
+        touches_bottom = (max_row == self.rows - 1)
+        spans_vertical = touches_top and touches_bottom
+        
+        # Check if spans left-to-right
+        touches_left = (min_col == 0)
+        touches_right = (max_col == self.cols - 1)
+        spans_horizontal = touches_left and touches_right
+        
+        if spans_vertical and spans_horizontal:
+            return True, "top-to-bottom AND left-to-right"
+        elif spans_vertical:
+            return True, "top-to-bottom"
+        elif spans_horizontal:
+            return True, "left-to-right"
+        else:
+            return False, "does not span opposite edges"
+
+
+    def _select_best_spangram(self, candidates, theme, all_words):
+        """
+        Use API to select the best spangram from multiple candidates
+        
+        Args:
+            candidates: List of candidate dicts
+            theme: Puzzle theme
+            all_words: All placed words
+            
+        Returns:
+            Selected candidate dict or None
+        """
+        # Build candidate descriptions
+        candidate_descriptions = []
+        for i, cand in enumerate(candidates, 1):
+            words = [w.upper() for w, _ in cand['words']]
+            word_str = " + ".join(words) if len(words) > 1 else words[0]
+            candidate_descriptions.append(f"{i}. {word_str} - {cand['reasoning']}")
+        
+        # Get all word names
+        all_word_names = [w.upper() for w, _ in all_words]
+        
+        prompt = f"""You are solving a NYT Strands puzzle with theme: "{theme}"
+
+All words in solution: {', '.join(all_word_names)}
+
+Multiple valid spangram candidates were found. Which one best represents the theme as a spangram?
+
+Candidates:
+{chr(10).join(candidate_descriptions)}
+
+The spangram should:
+1. Be a word/phrase that encompasses or represents the theme
+2. Span opposite edges of the grid (already verified)
+3. Be distinct from the regular theme words
+
+Respond with VALID JSON ONLY:
+{{
+  "selected_index": 1,
+  "reasoning": "why this is the best spangram for this theme"
+}}"""
+
+        try:
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": os.environ.get("ANTHROPIC_API_KEY", ""),
+                    "anthropic-version": "2023-06-01"
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 1000,
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                print(f"   ⚠️  API error: {response.status_code}")
+                return None
+            
+            data = response.json()
+            response_text = data['content'][0]['text'].strip()
+            
+            # Extract JSON
+            if not response_text.startswith('{'):
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}')
+                if start_idx != -1 and end_idx != -1:
+                    response_text = response_text[start_idx:end_idx+1]
+            
+            result = json.loads(response_text)
+            selected_idx = result.get('selected_index', 1)
+            reasoning = result.get('reasoning', '')
+            
+            # Validate index
+            if 1 <= selected_idx <= len(candidates):
+                selected = candidates[selected_idx - 1]
+                selected['reasoning'] = reasoning
+                return selected
+            else:
+                print(f"   ⚠️  Invalid index {selected_idx}")
+                return None
+            
+        except Exception as e:
+            print(f"   ⚠️  Error selecting spangram: {e}")
+            return None
+
+
     def print_grid(self):
         """Print the puzzle grid"""
         print("\nGrid:")
@@ -1826,26 +1988,7 @@ Return {api_limit} words ranked by relevance."""
 
 
 # ============================================================================
-# SECTION 3: SOLVING STRATEGIES
-# ============================================================================
-# 
-# The solver has 4 main strategies:
-# 1. solve_adaptive_clustering() - tries multiple theme interpretations
-# 2. solve_hybrid() - geometry-first approach with theme ranking  
-# 3. solve_optimal_ilp() - mathematical optimization (requires pulp)
-# 4. auto_solve_puzzle() - quick heuristic approach
-#
-# These methods are very long (1000+ lines total) and would make this file
-# too large. For now, I'm marking them as TODO to add back if needed.
-# ============================================================================
-
-# TODO: Add back solving strategies if needed
-# Currently commented out to keep file manageable
-# See original solver.py lines 500-2500 for full implementations
-
-
-# ============================================================================
-# SECTION 4: FILE I/O AND MAIN EXECUTION
+# SECTION 3: FILE I/O AND MAIN EXECUTION
 # ============================================================================
 
 def load_grid_from_json(json_path):
@@ -1931,23 +2074,11 @@ def solve_from_json(json_path, dictionary_path=DICTIONARY_PATH, use_theme_matchi
     # Print statistics
     solver.print_word_statistics()
     
-    # Find spangrams
-    print("\n" + "-"*70)
-    print("Searching for spangrams (words touching opposite edges)...")
-    spangrams = solver.find_spangrams()
-    
-    if spangrams:
-        print(f"✓ Found {len(spangrams)} potential spangram(s):")
-        for word in sorted(spangrams.keys()):
-            print(f"  • {word.upper()}")
-    else:
-        print("✗ No spangrams found")
-    
     # Theme matching and solving
     if use_theme_matching and puzzle_info.get('theme'):
         word_count = puzzle_info.get('word_count', 8)
         
-        # Use the improved adaptive clustering solver
+        # Use the adaptive clustering solver
         solution = solver.solve_adaptive_clustering(puzzle_info['theme'], word_count=word_count)
         
         if solution:
@@ -1976,7 +2107,7 @@ def solve_from_json(json_path, dictionary_path=DICTIONARY_PATH, use_theme_matchi
 if __name__ == "__main__":
     import sys
     
-    print("Strands Solver (Clean Version)")
+    print("Strands Solver (No Spangram Version)")
     print("=" * 70)
     
     if len(sys.argv) > 1:
