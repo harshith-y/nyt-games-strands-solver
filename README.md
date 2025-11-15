@@ -1,1 +1,1 @@
-**New York Times Games - Strands Solver**
+# New York Times Games - Strands Solver
