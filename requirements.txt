@@ -1,0 +1,15 @@
+# Requirements for NYT Strands Solver
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+pillow>=10.0.0          # Image loading and manipulation
+opencv-python>=4.8.0     # Computer vision and image processing
+pytesseract>=0.3.10      # OCR engine wrapper
+numpy>=1.24.0            # Array operations
+pulp>=2.7.0              # Integer Linear Programming for optimal solving
+
+# API and theme matching
+anthropic>=0.18.0        # Claude API for theme matching
+
+# Uncomment the line below if you want to use EasyOCR (slower but more accurate)
+easyocr>=1.7.0
