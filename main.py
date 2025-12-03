@@ -1,8 +1,3 @@
-"""
-Main entry point for Strands Solver
-Just press "Run" in VSCode!
-"""
-
 from dotenv import load_dotenv
 load_dotenv()  # This must come before using os.environ
 
@@ -197,8 +192,10 @@ def verify_and_correct_grid(grid, rows=8, cols=6):
         cols: Number of columns (default 6)
     
     Returns:
-        Corrected grid (list of lists)
+        Tuple of (corrected_grid, corrections_made_flag)
     """
+    
+    corrections_made = False  # Track if any corrections were made
     
     while True:
         # Display the grid with row/column numbers
@@ -228,7 +225,7 @@ def verify_and_correct_grid(grid, rows=8, cols=6):
         
         if response in ['yes', 'y']:
             print("  ✓ Grid verified!")
-            return grid
+            return grid, corrections_made
         
         elif response in ['no', 'n']:
             print("\n📝 Let's fix the errors...")
@@ -268,6 +265,7 @@ def verify_and_correct_grid(grid, rows=8, cols=6):
                 new_letter = input("  What should it be? (single letter): ").strip().upper()
                 if len(new_letter) == 1 and new_letter.isalpha():
                     grid[row_idx][col_idx] = new_letter
+                    corrections_made = True  # Mark that we made a correction
                     print(f"  ✓ Changed ({row_num}, {col_num}): {current_letter} → {new_letter}")
                     break
                 else:
@@ -394,17 +392,28 @@ def main():
                     print("\nPlease verify the extracted grid is correct.")
                     print("(You can fix any OCR errors before proceeding)")
                     
-                    corrected_grid = verify_and_correct_grid(grid, rows=ROWS, cols=COLS)
+                    corrected_grid, corrections_made = verify_and_correct_grid(grid, rows=ROWS, cols=COLS)
                     
-                    # If grid was corrected, update the JSON file
-                    if corrected_grid != grid:
-                        print("\n  📝 Updating saved file with corrections...")
+                    # If grid was corrected, update both JSON and TXT files
+                    if corrections_made:
+                        print("\n  📝 Updating saved files with corrections...")
+                        
+                        # Update JSON
                         with open(latest_json, 'r') as f:
                             data = json.load(f)
                         data['grid'] = corrected_grid
                         with open(latest_json, 'w') as f:
                             json.dump(data, f, indent=2)
-                        print("  ✓ Corrections saved!")
+                        print(f"    ✓ JSON saved: {latest_json}")
+                        
+                        # Update TXT file
+                        latest_txt = latest_json.replace('.json', '.txt')
+                        with open(latest_txt, 'w') as f:
+                            for row in corrected_grid:
+                                f.write(' '.join(row) + '\n')
+                        print(f"    ✓ TXT saved: {latest_txt}")
+                        
+                        print("  ✅ Corrections saved successfully!")
                         grid = corrected_grid  # Update grid variable
                     
                     # Now prompt for theme and word count, then update the JSON

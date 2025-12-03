@@ -43,7 +43,7 @@ CLOSE_ATTEMPT_THRESHOLD = 25         # Show attempts that use 40+ cells
 
 # Path search limits (to avoid combinatorial explosion)
 MAX_PATHS_PER_WORD = 5              # Max paths per word considered in a combo
-MAX_PATH_COMBOS_PER_COMBO = 500     # Max path combinations per word-set combo
+MAX_PATH_COMBOS_PER_COMBO = 3000     # Max path combinations per word-set combo
 
 # ============================================================================
 # SECTION 0: IMPROVEMENT HELPERS (Word Grouping & Trapped Letter Detection)
@@ -357,6 +357,8 @@ class StrandsSolver:
         """
         Use Claude API to filter words by theme relevance
         
+        IMPROVED VERSION: Shows API the actual words in grid and asks it to SELECT from those
+        
         Args:
             theme: Puzzle theme string
             word_count: Expected number of words
@@ -366,6 +368,7 @@ class StrandsSolver:
         """
         print(f"\n🤖 Using Claude API to match words to theme: '{theme}'")
         print(f"   Expected words: {word_count} ({word_count-1} theme words + 1 spangram)")
+        print("   Strategy: Show API actual grid words, ask it to SELECT from those")
         print("This may take 5-10 seconds...")
         
         # Check API key
@@ -378,49 +381,66 @@ class StrandsSolver:
             print("  3. Or add to ~/.bashrc or ~/.zshrc")
             return {}
         
-        # Prepare word candidates
+        # Prepare word candidates (4+ letters, sorted by length)
         candidates = []
         for word in self.found_words.keys():
-            if len(word) >= 3:  # Only words 3+ letters
+            if len(word) >= 4:  # Only words 4+ letters (Strands minimum)
                 candidates.append(word)
         
         candidates.sort(key=lambda w: len(w), reverse=True)  # Sort by length
         
-        # Build prompt for Claude
-        grid_text = '\n'.join([' '.join(row) for row in self.grid])
+        # Take top 150 words for API (good coverage without overwhelming)
+        top_candidates = candidates[:150]
         
-        candidate_list = ""
-        for i in range(0, len(candidates[:100]), 5):
-            chunk = candidates[i:i+5]
-            candidate_list += ", ".join(chunk) + "\n"
+        print(f"   Showing API {len(top_candidates)} actual words from grid...")
         
-        prompt = f"""You are solving a NYT Strands puzzle. The theme is: "{theme}"
+        # Format as comma-separated list
+        candidate_list = ", ".join([w.upper() for w in top_candidates])
+        
+        # Build IMPROVED prompt - shows API actual words, asks it to SELECT
+        prompt = f"""You are helping solve a NYT Strands word puzzle with theme: "{theme}"
 
-Grid:
-{grid_text}
-
-Find the {word_count-1} theme words (NOT including the spangram) that best match this theme.
-
-Candidate words (first 100):
+Here are 150 words that ACTUALLY EXIST in this puzzle's grid:
 {candidate_list}
 
-Instructions:
-1. Interpret the theme (it may be cryptic or a pun)
-2. Find {word_count-1} words that relate to your interpretation
-3. Rank by relevance (0.0 to 1.0)
-4. Explain your reasoning
+Your task: Select approximately {word_count*2} words from this list that best match the theme "{theme}".
 
-Return JSON:
+CRITICAL RULES:
+1. ONLY select words from the list above (don't suggest words not in the list!)
+2. Think about SPECIFIC categories the theme refers to
+3. Look for SPECIFIC examples matching the theme, not general/abstract concepts
+4. Avoid selecting multiple variants of the same word (e.g., don't pick both SPIDER and SPIDERS)
+5. Prefer common/simple words over technical or scientific terms
+6. Consider wordplay - the theme might be a pun, idiom, or have double meanings
+
+Theme interpretation examples:
+- "On the web" could mean:
+  * Types of spiders (look for specific spider names: WIDOW, RECLUSE, HUNTSMAN, TARANTULA, JUMPING, HOUSE)
+  * OR internet terms (look for: BROWSER, WEBSITE, ONLINE, STREAMING)
+  
+- "Things are starting to take shape" could mean:
+  * Geometric shapes (look for: ANGLE, OVAL, TRIANGLE, RECTANGLE, PENTAGON, OCTAGON, POLYGON)
+  * OR things forming/developing (look for: FORMING, BUILDING, GROWING)
+
+For theme "{theme}", think step-by-step:
+1. What does "{theme}" literally mean?
+2. Is there wordplay involved? (puns, idioms, double meanings?)
+3. What SPECIFIC category of things does this describe?
+4. What are examples of that category?
+5. Which words from the list match those examples?
+
+Return ONLY valid JSON (no markdown, no code blocks):
 {{
-  "theme_interpretation": "your interpretation",
+  "theme_interpretation": "Brief explanation of what '{theme}' means",
+  "expected_category": "Specific category (e.g., 'types of spiders', NOT just 'spider-related')",
   "words": [
-    {{"word": "word1", "relevance": 0.95, "reasoning": "why it fits"}},
-    ...
-  ],
-  "spangram_candidates": [
-    {{"word": "spangram1", "relevance": 0.90, "category": "type of spangram"}}
+    {{"word": "WORD1", "relevance": 0.95, "reasoning": "Why this specific word fits the category"}},
+    {{"word": "WORD2", "relevance": 0.90, "reasoning": "Why this specific word fits"}}
   ]
-}}"""
+}}
+
+Select approximately {word_count*2} words from the list, sorted by relevance (highest first).
+Focus on SPECIFIC examples, not general terms or scientific vocabulary."""
         
         # Call Claude API
         try:
@@ -506,24 +526,12 @@ Return JSON:
                 return {}
             
             # Print interpretation
-            print(f"\n💡 Theme interpretations:")
+            print(f"\n💡 Theme interpretation:")
             interpretation = result.get('theme_interpretation', 'Unknown')
+            expected_category = result.get('expected_category', '')
             print(f"  🎯 {interpretation}")
-            
-            # Print spangram candidates
-            spangram_candidates = result.get('spangram_candidates', [])
-            if spangram_candidates:
-                print(f"\n🎯 Spangram candidates:")
-                for s in spangram_candidates[:5]:
-                    word = s.get('word', '').upper()
-                    score = s.get('relevance', 0)
-                    category = s.get('category', '')
-                    reasoning = s.get('reasoning', '')[:80]
-                    print(f"  • {word} ({score:.0%})")
-                    if category:
-                        print(f"     Category: {category}")
-                    if reasoning:
-                        print(f"     → {reasoning}")
+            if expected_category:
+                print(f"  📂 Expected category: {expected_category}")
             
             # Process theme words
             theme_words = result.get('words', [])
@@ -794,6 +802,96 @@ Return {api_limit} words ranked by relevance."""
         
         return score
     
+    
+    def solve_greedy_longest_first(self, target_word_count=8, min_word_length=4):
+        """
+        Fallback solver: Ignore theme, place longest words first
+        
+        This greedy approach often works when semantic matching fails because:
+        - Long words are more specific (less ambiguous)
+        - Long words have fewer placement options (less overlap potential)
+        - Greedy placement is fast (seconds vs minutes)
+        
+        IMPORTANT: Enforces hard constraints:
+        - Exactly target_word_count words
+        - All words >= min_word_length letters
+        - All cells used exactly once
+        
+        Args:
+            target_word_count: Exact number of words to place (default 8)
+            min_word_length: Minimum word length (default 4)
+        
+        Returns:
+            List of (word, path) tuples or None if constraints can't be met
+        """
+        print(f"\n{'='*70}")
+        print(f"🔧 FALLBACK: GREEDY LONGEST-FIRST SOLVER")
+        print(f"{'='*70}")
+        print(f"\nIgnoring theme - trying pure geometric approach...")
+        print(f"Strategy: Place longest words first, then fill remaining cells")
+        print(f"Constraints: Exactly {target_word_count} words, all ≥{min_word_length} letters\n")
+        
+        # Sort all words by length (4+ letters only)
+        all_words_sorted = sorted(
+            [(w, paths) for w, paths in self.found_words.items() if len(w) >= min_word_length],
+            key=lambda x: len(x[0]),
+            reverse=True
+        )
+        
+        placed_words = []
+        used_cells = set()
+        total_cells = self.rows * self.cols
+        
+        # Try placing each word (longest first)
+        for word, paths in all_words_sorted:
+            # Stop if we've placed target number of words
+            if len(placed_words) >= target_word_count:
+                break
+            
+            # Try each path for this word (take first that works)
+            for path in paths[:3]:  # Only try first 3 paths for speed
+                path_cells = set(path)
+                
+                if not (path_cells & used_cells):  # No overlap
+                    placed_words.append((word, path))
+                    used_cells |= path_cells
+                    
+                    cells_pct = 100 * len(used_cells) / total_cells
+                    
+                    # Show first 10 placements
+                    if len(placed_words) <= 10:
+                        print(f"  ✓ {len(placed_words):2}. {word.upper():<15} "
+                              f"({len(word)} letters) → {len(used_cells)}/{total_cells} cells "
+                              f"({cells_pct:.0f}%)")
+                    
+                    break  # Placed this word, move to next
+        
+        # Check if we met all constraints
+        cells_used = len(used_cells)
+        words_placed = len(placed_words)
+        
+        print(f"\n{'='*70}")
+        print(f"GREEDY RESULT")
+        print(f"{'='*70}")
+        print(f"  Words placed: {words_placed}/{target_word_count}")
+        print(f"  Cells used: {cells_used}/{total_cells}")
+        
+        # Verify constraints
+        if words_placed == target_word_count and cells_used == total_cells:
+            print(f"  ✅ SUCCESS! All constraints met!")
+            return placed_words
+        elif words_placed == target_word_count:
+            print(f"  ⚠️  Correct word count but only {cells_used}/{total_cells} cells used")
+            print(f"     (Leftover cells: {total_cells - cells_used})")
+            # Could try to fill leftover cells here
+            return None
+        elif cells_used == total_cells:
+            print(f"  ⚠️  All cells used but wrong word count ({words_placed} vs {target_word_count})")
+            return None
+        else:
+            print(f"  ❌ Failed - neither word count nor cells match")
+            return None
+    
     def solve_adaptive_clustering(self, theme, word_count=8):
         """
         Multi-interpretation adaptive clustering
@@ -895,6 +993,34 @@ Return {api_limit} words ranked by relevance."""
                 print("✗ Solve failed, continuing search...\n")
         
         print(f"\n❌ No solution found after trying {len(all_clusters)} interpretations")
+        
+        # Try greedy fallback
+        print(f"\n{'='*70}")
+        print(f"🔧 ACTIVATING FALLBACK SOLVER")
+        print(f"{'='*70}")
+        print(f"\nTheme matching failed - trying geometry-first approach...")
+        
+        fallback_result = self.solve_greedy_longest_first(
+            target_word_count=word_count,
+            min_word_length=4
+        )
+        
+        if fallback_result:
+            print(f"\n{'='*70}")
+            print(f"✅ FALLBACK SOLVER SUCCEEDED!")
+            print(f"{'='*70}")
+            print(f"\nFound solution using greedy placement (ignoring theme)")
+            
+            # Return in same format as main solver
+            # Note: Spangram identification will happen in Phase 2
+            return {
+                "placed_words": fallback_result,
+                "method": "greedy_fallback",
+                "theme_interpretation": "Greedy placement (theme ignored)",
+                "cells_used": sum(len(path) for _, path in fallback_result)
+            }
+        
+        print(f"\n⚠️  Fallback solver also failed")
         return None
     
     def _try_solve_with_cluster(self, cluster, word_count):
