@@ -19,20 +19,18 @@ from datetime import datetime
 # ============================================================================
 
 # Path to sample screenshots
-SAMPLES_DIR = "data/samples"
+SAMPLES_DIR = "data/screenshots"
 
 # Path to save extracted grids
 OUTPUT_DIR = "data"
 
 # Default sample images to test (relative to SAMPLES_DIR)
 DEFAULT_TEST_IMAGES = [
-    "IMG_1009.PNG",
-    "IMG_1026.PNG", 
-    "IMG_1016.PNG"
+    "IMG_1275.PNG"
 ]
 
 # OCR Engine: 'pytesseract' (fast) or 'easyocr' (more accurate but slower)
-DEFAULT_OCR_ENGINE = 'pytesseract'
+DEFAULT_OCR_ENGINE = 'easyocr'
 
 # Default grid dimensions for Strands
 DEFAULT_ROWS = 8
@@ -269,45 +267,101 @@ class AutoGridDetector:
         return self.rows, self.cols, self.grid_region
 
 
+
 class StrandsOCRv2:
-    """
-    Advanced OCR for Strands puzzles
-    Automatically handles light/dark mode and uses multiple strategies
-    """
-    
-    def __init__(self, image_path, ocr_engine='pytesseract', output_dir=OUTPUT_DIR):
-        """
-        Initialize OCR
-        
-        Args:
-            image_path: Path to screenshot
-            ocr_engine: 'pytesseract' (fast) or 'easyocr' (accurate but slower)
-            output_dir: Directory to save extracted grids
-        """
+    def __init__(
+        self,
+        image_path,
+        ocr_engine="pytesseract",
+        output_dir=OUTPUT_DIR,
+        recognizer="ocr",               # NEW: "ocr", "template", "hybrid"
+        templates_path=None,            # NEW: path to .npz
+        template_size=(64, 64),         # NEW: must match build_templates.py
+    ):
         self.image_path = image_path
-        self.output_dir = output_dir
-        self.image = None
-        self.grid = None
-        self.theme = None
         self.ocr_engine = ocr_engine
+        self.output_dir = output_dir
+        self.recognizer = recognizer
+        self.templates_path = templates_path
+        self.template_size = template_size
+
+        self.image = None
         self.is_dark_mode = None
-        
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Try to import EasyOCR if requested
-        self.easyocr_reader = None
-        if ocr_engine == 'easyocr':
-            try:
-                import easyocr
-                print("Initializing EasyOCR (this may take a moment on first run)...")
-                self.easyocr_reader = easyocr.Reader(['en'], gpu=False)
-                print("EasyOCR initialized!")
-            except ImportError:
-                print("⚠️  EasyOCR not installed, falling back to Pytesseract")
-                print("Install with: pip install easyocr")
-                self.ocr_engine = 'pytesseract'
-    
+        self.theme = None
+        self.grid = None
+
+        self.templates = {}            # dict: letter -> (N, D) vectors
+
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        # existing OCR engine setup...
+        if self.ocr_engine == "easyocr":
+            import easyocr
+            self.easyocr_reader = easyocr.Reader(["en"], gpu=False)
+        else:
+            self.easyocr_reader = None
+
+        if self.recognizer in ("template", "hybrid") and self.templates_path:
+            self._load_templates(self.templates_path)
+
+    def _load_templates(self, path):
+        """
+        Load templates from .npz and pre-normalise for cosine similarity.
+        Each npz entry: letter -> (N, H, W) uint8.
+        We store: letter -> (N, D) float32, zero-mean, unit-norm.
+        """
+        data = np.load(path)
+        templates = {}
+
+        for letter in data.files:
+            arr = data[letter].astype(np.float32) / 255.0  # (N, H, W)
+            N, H, W = arr.shape
+
+            flat = arr.reshape(N, -1)  # (N, D)
+            flat = flat - flat.mean(axis=1, keepdims=True)  # zero-mean
+            norms = np.linalg.norm(flat, axis=1, keepdims=True) + 1e-8
+            flat = flat / norms  # unit-norm
+
+            templates[letter] = flat
+            print(f"[TEMPLATES] {letter}: {flat.shape[0]} samples, dim={flat.shape[1]}")
+
+        self.templates = templates
+
+    def preprocess_for_templates(self, cell_image):
+        """
+        For template matching: same as OCR preprocessing, then resize.
+        """
+        processed = self.preprocess_for_ocr(cell_image)
+        resized = cv2.resize(processed, self.template_size, interpolation=cv2.INTER_AREA)
+        return resized
+
+    def template_match_letter(self, cell_image):
+        """
+        Returns (best_letter, best_score) via cosine similarity.
+        """
+        if not self.templates:
+            return None, -1.0
+
+        proc = self.preprocess_for_templates(cell_image)
+        x = proc.astype(np.float32) / 255.0
+        x = x.reshape(-1)
+        x = x - x.mean()
+        norm = np.linalg.norm(x) + 1e-8
+        x = x / norm
+
+        best_letter = None
+        best_score = -1.0
+
+        for letter, tmpl_vecs in self.templates.items():
+            # tmpl_vecs: (N, D)
+            scores = tmpl_vecs @ x  # (N,)
+            letter_best = float(scores.max())
+            if letter_best > best_score:
+                best_score = letter_best
+                best_letter = letter
+
+        return best_letter, best_score
+
     def load_image(self):
         """Load image from path"""
         pil_image = Image.open(self.image_path)
@@ -433,13 +487,13 @@ class StrandsOCRv2:
         
         return self.theme
     
-    def ocr_single_letter(self, cell_image):
+    def _ocr_engine_letter(self, cell_image):
         """
         OCR a single letter from a cell with multiple fallback strategies
-        
+
         Args:
             cell_image: Image of a single grid cell
-        
+
         Returns:
             Single uppercase letter or '?'
         """
@@ -448,17 +502,24 @@ class StrandsOCRv2:
         
         if self.ocr_engine == 'easyocr' and self.easyocr_reader:
             # EasyOCR with larger image and better parameters
-            results = self.easyocr_reader.readtext(processed, detail=0, 
-                                                   allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-                                                   paragraph=False,
-                                                   contrast_ths=0.1,
-                                                   adjust_contrast=0.5,
-                                                   text_threshold=0.5,
-                                                   width_ths=0.7)
+            results = self.easyocr_reader.readtext(
+                processed,
+                detail=0,
+                allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+                paragraph=False,
+                contrast_ths=0.1,
+                adjust_contrast=0.5,
+                text_threshold=0.5,
+                width_ths=0.7
+            )
             text = ''.join(results).strip()
         else:
             # Pytesseract with optimized config for single character
-            config = '--psm 10 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ -c tessedit_char_blacklist=0123456789'
+            config = (
+                '--psm 10 --oem 3 '
+                '-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ '
+                '-c tessedit_char_blacklist=0123456789'
+            )
             text = pytesseract.image_to_string(processed, config=config).strip()
         
         # Extract first letter
@@ -474,8 +535,13 @@ class StrandsOCRv2:
                 gray_check = cv2.cvtColor(cell_image, cv2.COLOR_BGR2GRAY)
                 if self.is_dark_mode:
                     gray_check = cv2.bitwise_not(gray_check)
-                _, thresh = cv2.threshold(gray_check, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                _, thresh = cv2.threshold(
+                    gray_check, 0, 255,
+                    cv2.THRESH_BINARY + cv2.THRESH_OTSU
+                )
+                contours, _ = cv2.findContours(
+                    thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
                 if contours:
                     c = max(contours, key=cv2.contourArea)
                     x, y, w, h = cv2.boundingRect(c)
@@ -499,6 +565,39 @@ class StrandsOCRv2:
         result = self._geometric_letter_detection(cell_image)
         
         return result
+
+    def ocr_single_letter(self, cell_image):
+        """
+        Unified interface for per-cell recognition.
+
+        Uses one of:
+          - template-only        (recognizer == "template")
+          - OCR-only             (recognizer == "ocr")
+          - hybrid (template+OCR) (recognizer == "hybrid")
+        """
+        # Template-only mode
+        if getattr(self, "recognizer", "ocr") == "template":
+            letter_t, score_t = self.template_match_letter(cell_image)
+            return letter_t if letter_t is not None else "?"
+
+        # Hybrid mode: template first, then OCR fallback
+        if self.recognizer == "hybrid":
+            letter_t, score_t = self.template_match_letter(cell_image)
+            # If template is confident enough, trust it
+            if letter_t is not None and score_t >= 0.6:  # threshold to tune
+                return letter_t
+
+            # Otherwise try the OCR engine
+            letter_o = self._ocr_engine_letter(cell_image)
+            if letter_o != "?":
+                return letter_o
+
+            # OCR failed; fall back to whatever template suggested
+            return letter_t if letter_t is not None else "?"
+
+        # Default / OCR-only mode (current behaviour)
+        return self._ocr_engine_letter(cell_image)
+
     
     def _try_alternative_ocr(self, cell_image):
         """
@@ -649,7 +748,7 @@ class StrandsOCRv2:
             for col in range(cols):
                 # Extract cell with padding to focus on letter
                 # Minimal padding for high-res screens
-                padding = 0.10 if height < 2000 else 0.12  # Very minimal padding
+                padding = 0.10 #if height < 2000 else 0.12  # Very minimal padding
                 
                 y1 = row * cell_height + int(cell_height * padding)
                 y2 = (row + 1) * cell_height - int(cell_height * padding)
@@ -746,53 +845,53 @@ class StrandsOCRv2:
                         else:
                             print(f" → Keeping as M")
                 
-                elif grid[row][col] == 'V':
-                    # Check if this V is actually a Y
-                    # Y has a vertical stem extending down from the junction point
-                    # V comes to a point at the bottom
-                    y1 = row * cell_height + int(cell_height * padding)
-                    y2 = (row + 1) * cell_height - int(cell_height * padding)
-                    x1 = col * cell_width + int(cell_width * padding)
-                    x2 = (col + 1) * cell_width - int(cell_width * padding)
-                    cell = grid_image[y1:y2, x1:x2]
+                # elif grid[row][col] == 'V':
+                #     # Check if this V is actually a Y
+                #     # Y has a vertical stem extending down from the junction point
+                #     # V comes to a point at the bottom
+                #     y1 = row * cell_height + int(cell_height * padding)
+                #     y2 = (row + 1) * cell_height - int(cell_height * padding)
+                #     x1 = col * cell_width + int(cell_width * padding)
+                #     x2 = (col + 1) * cell_width - int(cell_width * padding)
+                #     cell = grid_image[y1:y2, x1:x2]
                     
-                    gray_check = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-                    if self.is_dark_mode:
-                        gray_check = cv2.bitwise_not(gray_check)
+                #     gray_check = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+                #     if self.is_dark_mode:
+                #         gray_check = cv2.bitwise_not(gray_check)
                     
-                    _, thresh = cv2.threshold(gray_check, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                #     _, thresh = cv2.threshold(gray_check, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
                     
-                    h, w = thresh.shape
+                #     h, w = thresh.shape
                     
-                    # Y has stem, V doesn't - check multiple vertical slices
-                    # Look at center column through different height ranges
-                    center_col = int(w * 0.5)
-                    center_width = max(3, int(w * 0.15))  # Check narrow center band
-                    col_start = center_col - center_width // 2
-                    col_end = center_col + center_width // 2
+                #     # Y has stem, V doesn't - check multiple vertical slices
+                #     # Look at center column through different height ranges
+                #     center_col = int(w * 0.5)
+                #     center_width = max(3, int(w * 0.15))  # Check narrow center band
+                #     col_start = center_col - center_width // 2
+                #     col_end = center_col + center_width // 2
                     
-                    # Check from 40% to 75% height (where Y stem typically is)
-                    stem_region = thresh[int(h*0.4):int(h*0.75), col_start:col_end]
+                #     # Check from 40% to 75% height (where Y stem typically is)
+                #     stem_region = thresh[int(h*0.4):int(h*0.75), col_start:col_end]
                     
-                    # Count black pixels
-                    black_pixels = np.sum(stem_region == 0)
-                    total_pixels = stem_region.size
-                    density = black_pixels / total_pixels if total_pixels > 0 else 0
+                #     # Count black pixels
+                #     black_pixels = np.sum(stem_region == 0)
+                #     total_pixels = stem_region.size
+                #     density = black_pixels / total_pixels if total_pixels > 0 else 0
                     
-                    # Also check vertical continuity - Y has continuous vertical line
-                    # Project horizontally to see if there's a clear vertical stroke
-                    horizontal_projection = np.sum(stem_region == 0, axis=1)
-                    max_density_in_row = np.max(horizontal_projection) if len(horizontal_projection) > 0 else 0
+                #     # Also check vertical continuity - Y has continuous vertical line
+                #     # Project horizontally to see if there's a clear vertical stroke
+                #     horizontal_projection = np.sum(stem_region == 0, axis=1)
+                #     max_density_in_row = np.max(horizontal_projection) if len(horizontal_projection) > 0 else 0
                     
-                    print(f"  → Checking V at position ({row+1},{col+1}) - density: {density:.2f}, max_row: {max_density_in_row}", end="")
+                #     print(f"  → Checking V at position ({row+1},{col+1}) - density: {density:.2f}, max_row: {max_density_in_row}", end="")
                     
-                    # Y has EITHER high overall density OR strong vertical presence in center
-                    if density > 0.08 or max_density_in_row > center_width * 0.7:
-                        grid[row][col] = 'Y'
-                        corrections_made += 1
-                        print(f" → Converting to Y!")
-                    else:
-                        print(f" → Keeping as V")
+                #     # Y has EITHER high overall density OR strong vertical presence in center
+                #     if density > 0.08 or max_density_in_row > center_width * 0.7:
+                #         grid[row][col] = 'Y'
+                #         corrections_made += 1
+                #         print(f" → Converting to Y!")
+                #     else:
+                #         print(f" → Keeping as V")
         
         if corrections_made > 0:
             print(f"\n✓ Made {corrections_made} auto-correction(s)")
@@ -1048,21 +1147,25 @@ class StrandsOCRv2:
         return grid, theme, saved_files
 
 
-def quick_extract(image_path, rows=8, cols=6, ocr_engine='pytesseract', output_dir=OUTPUT_DIR):
+def quick_extract(
+    image_path,
+    rows=8,
+    cols=6,
+    ocr_engine='pytesseract',
+    output_dir=OUTPUT_DIR,
+    recognizer="ocr",
+    templates_path=None,
+):
     """
     Quick extraction function
-    
-    Args:
-        image_path: Path to screenshot
-        rows: Number of rows
-        cols: Number of columns  
-        ocr_engine: 'pytesseract' (fast) or 'easyocr' (accurate)
-        output_dir: Directory to save extracted grids
-    
-    Returns:
-        Tuple of (grid, theme, saved_files)
     """
-    ocr = StrandsOCRv2(image_path, ocr_engine=ocr_engine, output_dir=output_dir)
+    ocr = StrandsOCRv2(
+        image_path,
+        ocr_engine=ocr_engine,
+        output_dir=output_dir,
+        recognizer=recognizer,
+        templates_path=templates_path,
+    )
     grid, theme, saved_files = ocr.full_extraction_pipeline(rows, cols)
     return grid, theme, saved_files
 
@@ -1080,6 +1183,19 @@ if __name__ == "__main__":
                        help=f'Output directory (default: {OUTPUT_DIR})')
     parser.add_argument('--test', action='store_true', 
                        help='Test on sample screenshots')
+    parser.add_argument(
+        "--recognizer",
+        choices=["ocr", "template", "hybrid"],
+        default="ocr",
+        help="Which per-cell recognizer to use."
+    )
+    parser.add_argument(
+        "--templates_path",
+        type=str,
+        default=None,
+        help="Path to .npz template bank (for template/hybrid)."
+    )
+
     
     args = parser.parse_args()
     

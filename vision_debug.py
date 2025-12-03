@@ -131,14 +131,14 @@ if __name__ == "__main__":
     import glob
     
     # Find image
-    sample_images = glob.glob("data/samples/*.PNG") + glob.glob("data/samples/*.png")
+    sample_images = glob.glob("data/screenshots/*.PNG") + glob.glob("data/screenshots/*.png")
     
     if not sample_images and len(sys.argv) < 2:
         print("Usage: python debug_ocr.py <image_path>")
         print("\nOr place images in data/samples/")
         exit()
     
-    image_path = "data/samples/IMG_1016.PNG"
+    image_path = "data/screenshots/IMG_1016.PNG"
     
     grid, errors = debug_ocr_cells(image_path)
     

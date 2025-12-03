@@ -22,10 +22,16 @@ INPUT_METHOD = "auto"  # Change to "ocr" or "manual" to skip the prompt
 # What do you want to do? Options: "extract", "solve", "both"
 MODE = "both"  # "extract" = OCR only, "solve" = solve only, "both" = do both
 
-IMAGE_TO_EXTRACT = "IMG_1009.PNG" 
+IMAGE_TO_EXTRACT = "IMG_1275.PNG" 
 
 # OCR engine: "pytesseract" (fast) or "easyocr" (accurate)
 OCR_ENGINE = "easyocr"
+
+# Template recognizer mode: "ocr", "template", or "hybrid"
+RECOGNIZER_MODE = "template"
+
+# Path to the template bank
+TEMPLATES_PATH = "templates/letter_templates_v1.npz"
 
 # Grid dimensions
 ROWS = 8
@@ -180,6 +186,105 @@ def manual_grid_entry_inline(image_name, rows=8, cols=6):
     return output_file
 
 
+def verify_and_correct_grid(grid, rows=8, cols=6):
+    """
+    Interactive verification of OCR-extracted grid.
+    Allows user to correct errors with 1-indexed row/column numbers.
+    
+    Args:
+        grid: List of lists containing the extracted letters
+        rows: Number of rows (default 8)
+        cols: Number of columns (default 6)
+    
+    Returns:
+        Corrected grid (list of lists)
+    """
+    
+    while True:
+        # Display the grid with row/column numbers
+        print("\n" + "="*70)
+        print("EXTRACTED GRID - PLEASE VERIFY")
+        print("="*70)
+        
+        # Column headers (1-indexed)
+        print("\n     ", end="")
+        for c in range(1, cols + 1):
+            print(f" {c} ", end="")
+        print()
+        print("    " + "-" * (cols * 3 + 1))
+        
+        # Grid rows with row numbers (1-indexed)
+        for r in range(rows):
+            print(f"  {r+1} |", end="")
+            for c in range(cols):
+                print(f" {grid[r][c]} ", end="")
+            print("|")
+        
+        print("    " + "-" * (cols * 3 + 1))
+        
+        # Ask if correct
+        print("\n" + "-"*70)
+        response = input("\nIs this grid correct? (yes/no): ").strip().lower()
+        
+        if response in ['yes', 'y']:
+            print("  ✓ Grid verified!")
+            return grid
+        
+        elif response in ['no', 'n']:
+            print("\n📝 Let's fix the errors...")
+            
+            # Get row number (1-indexed)
+            while True:
+                try:
+                    row_input = input(f"\nWhich row has an error? (1-{rows}): ").strip()
+                    row_num = int(row_input)
+                    if 1 <= row_num <= rows:
+                        row_idx = row_num - 1  # Convert to 0-indexed
+                        break
+                    else:
+                        print(f"  ⚠️  Please enter a number between 1 and {rows}")
+                except ValueError:
+                    print(f"  ⚠️  Please enter a valid number")
+            
+            # Get column number (1-indexed)
+            while True:
+                try:
+                    col_input = input(f"Which column has an error? (1-{cols}): ").strip()
+                    col_num = int(col_input)
+                    if 1 <= col_num <= cols:
+                        col_idx = col_num - 1  # Convert to 0-indexed
+                        break
+                    else:
+                        print(f"  ⚠️  Please enter a number between 1 and {cols}")
+                except ValueError:
+                    print(f"  ⚠️  Please enter a valid number")
+            
+            # Show current letter
+            current_letter = grid[row_idx][col_idx]
+            print(f"\n  Current letter at position ({row_num}, {col_num}): {current_letter}")
+            
+            # Get correct letter
+            while True:
+                new_letter = input("  What should it be? (single letter): ").strip().upper()
+                if len(new_letter) == 1 and new_letter.isalpha():
+                    grid[row_idx][col_idx] = new_letter
+                    print(f"  ✓ Changed ({row_num}, {col_num}): {current_letter} → {new_letter}")
+                    break
+                else:
+                    print("  ⚠️  Please enter a single letter (A-Z)")
+            
+            # Ask if there are more errors
+            print()
+            more = input("Are there more errors to fix? (yes/no): ").strip().lower()
+            if more not in ['yes', 'y']:
+                # Show the corrected grid one more time for final verification
+                continue  # Loop back to show grid and verify again
+        
+        else:
+            print("  ⚠️  Please answer 'yes' or 'no'")
+
+
+
 def main():
     """Main function - runs when you press Play in VSCode"""
     
@@ -204,13 +309,13 @@ def main():
         print("   You'll see all words without AI filtering")
     
     # Build full path to image
-    image_path = os.path.join("data", "samples", IMAGE_TO_EXTRACT)
+    image_path = os.path.join("data", "screenshots", IMAGE_TO_EXTRACT)
     
     # Check if image exists
     if not os.path.exists(image_path):
         print(f"\n❌ Error: Image not found at {image_path}")
-        print("\nAvailable images in data/samples/:")
-        samples_dir = "data/samples"
+        print("\nAvailable images in data/screenshots/:")
+        samples_dir = "data/screenshots"
         if os.path.exists(samples_dir):
             images = [f for f in os.listdir(samples_dir) 
                      if f.endswith(('.png', '.PNG', '.jpg', '.jpeg', '.JPG'))]
@@ -267,17 +372,40 @@ def main():
             
             try:
                 grid, theme, saved_files = quick_extract(
-                    image_path, 
-                    rows=ROWS, 
-                    cols=COLS, 
+                    image_path,
+                    rows=ROWS,
+                    cols=COLS,
                     ocr_engine=OCR_ENGINE,
-                    output_dir="data/inputs"
+                    output_dir="data/inputs",
+                    recognizer=RECOGNIZER_MODE,
+                    templates_path=TEMPLATES_PATH,
                 )
+
                 
                 if saved_files:
                     print(f"\n✅ Extraction complete!")
                     print(f"   Saved {len(saved_files)} file(s)")
                     latest_json = [f for f in saved_files if f.endswith('.json')][0]
+                    
+                    # Interactive verification and correction
+                    print("\n" + "="*70)
+                    print("🔍 GRID VERIFICATION")
+                    print("="*70)
+                    print("\nPlease verify the extracted grid is correct.")
+                    print("(You can fix any OCR errors before proceeding)")
+                    
+                    corrected_grid = verify_and_correct_grid(grid, rows=ROWS, cols=COLS)
+                    
+                    # If grid was corrected, update the JSON file
+                    if corrected_grid != grid:
+                        print("\n  📝 Updating saved file with corrections...")
+                        with open(latest_json, 'r') as f:
+                            data = json.load(f)
+                        data['grid'] = corrected_grid
+                        with open(latest_json, 'w') as f:
+                            json.dump(data, f, indent=2)
+                        print("  ✓ Corrections saved!")
+                        grid = corrected_grid  # Update grid variable
                     
                     # Now prompt for theme and word count, then update the JSON
                     theme = get_theme_input()
